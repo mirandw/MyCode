@@ -1,0 +1,262 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <mntent.h>
+#include <unistd.h>
+
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <linux/if_ether.h>
+#include <linux/if_packet.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <net/ethernet.h>
+#include <netinet/ip.h>
+#include <netinet/udp.h>
+#include <sys/signal.h>
+#include <ctype.h>
+#include <fcntl.h>
+
+#include <sys/select.h>
+#include <sys/time.h>
+
+
+
+#define ETH_HDR_LEN (sizeof(struct ether_header)) /*14 bytes*/
+#define IP_HDR_LEN (sizeof(struct ip)) /*20 bytes*/
+
+struct eth_data {
+	int sockfd;
+	int ifindex;
+	struct sockaddr_ll sock_addr;
+	unsigned char mac[6];
+};
+
+int setNonBlocking(int sockfd)
+{
+    int opts;
+    opts=fcntl(sockfd,F_GETFL);
+    if(opts<0)
+    {
+        printf("[%s %d] Fcntl Sock GETFL fail!\n",__FUNCTION__,__LINE__);
+        return -1;
+    }
+
+    opts = opts|O_NONBLOCK;
+    if(fcntl(sockfd,F_SETFL,opts)<0)
+    {
+        printf("[%s %d] Fcntl Sock SETFL fail!\n",__FUNCTION__,__LINE__);
+        return -1;
+    }
+
+    return 0;
+}
+
+void gen_mac_ip_header(struct eth_data *pdata, char *buf, int data_len)
+{
+	struct ether_header *eth;
+	struct ip *ip;
+
+	if (!pdata || !buf) {
+		printf("parameter NULL pointer\n");
+		return;
+	}
+
+	/* fill in mac header */
+	eth = (struct ether_header *)buf;
+	memcpy(eth->ether_dhost, pdata->mac, ETH_ALEN);
+	memcpy(eth->ether_shost, pdata->mac, ETH_ALEN);
+	eth->ether_type = htons(ETHERTYPE_IP);
+
+	/* fill in ip header */
+	ip = (struct ip *)(buf + ETH_HDR_LEN);
+	ip->ip_v = IPVERSION;
+	ip->ip_hl = IP_HDR_LEN >> 2;
+	ip->ip_tos = 0;
+	ip->ip_len = htons(IP_HDR_LEN + data_len);
+	ip->ip_id = 0;
+	ip->ip_off = 0;
+	ip->ip_ttl = MAXTTL;
+	ip->ip_p = IPPROTO_RAW;
+	ip->ip_sum = 0;
+	ip->ip_dst.s_addr = inet_addr("192.168.0.1");
+	ip->ip_src.s_addr = inet_addr("192.168.0.3");
+}
+
+int sock_create_bind(char *eth_if, struct eth_data *data)
+{
+	struct sockaddr_ll sock_addr;
+	struct ifreq ifr;
+	int sockfd;
+	int ret;
+
+	if (!eth_if || !data) {
+		printf("parameter NULL pointer\n");
+		return -1;
+	}
+
+	sockfd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+	if (sockfd < 0) {
+		printf("create client socket fail\n");
+		return -1;
+	}
+	setNonBlocking(sockfd);
+
+	memset(&ifr, 0, sizeof(struct ifreq));
+	strcpy(ifr.ifr_name, eth_if);
+
+	/* get eth ifindex */
+	ret = ioctl(sockfd, SIOCGIFINDEX, &ifr);
+	if (ret < 0) {
+		printf("get dev interface fail\n");
+		return -1;
+	}
+
+	memset(&sock_addr, 0, sizeof(struct sockaddr_ll));
+	sock_addr.sll_family = AF_PACKET;
+	sock_addr.sll_protocol = htons(ETH_P_IP);
+	sock_addr.sll_ifindex = ifr.ifr_ifindex;
+	data->ifindex = ifr.ifr_ifindex;
+	//bind(sockfd, (struct sockaddr *)&sock_addr, sizeof(sock_addr));
+
+	/* get eth mac addr */
+	ret = ioctl(sockfd, SIOCGIFHWADDR, &ifr);
+	if (ret < 0) {
+		printf("get mac addr fail\n");
+		return -1;
+	}
+	memcpy(data->mac, ifr.ifr_hwaddr.sa_data, ETH_ALEN);
+
+	data->sockfd = sockfd;
+	data->sock_addr = sock_addr;
+
+	return sockfd;
+}
+int srv_sock_create(char *eth_if, struct eth_data *data)
+{
+	struct ifreq ifr;
+	struct sockaddr_ll sock_addr;
+	int sockfd;
+	int ret;
+
+	if (!eth_if || !data) {
+		printf("parameter NULL pointer\n");
+		return -1;
+	}
+
+	sockfd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+	if (sockfd < 0) {
+		printf("create client socket fail\n");
+		return -1;
+	}
+	setNonBlocking(sockfd);
+
+	memset(&ifr, 0, sizeof(struct ifreq));
+	strcpy(ifr.ifr_name, eth_if);
+
+	/* get eth ifindex */
+	ret = ioctl(sockfd, SIOCGIFINDEX, &ifr);
+	if (ret < 0) {
+		printf("get dev interface fail\n");
+		return -1;
+	}
+
+	data->ifindex = ifr.ifr_ifindex;
+
+	/* get eth mac addr */
+	ret = ioctl(sockfd, SIOCGIFHWADDR, &ifr);
+	if (ret < 0) {
+		printf("get mac addr fail\n");
+		return -1;
+	}
+	memcpy(data->mac, ifr.ifr_hwaddr.sa_data, ETH_ALEN);
+
+	data->sockfd = sockfd;
+	data->sock_addr = sock_addr;
+
+	return sockfd;
+}
+
+int main(void *priv)
+{
+	struct eth_data cli_data, srv_data;
+	char mac_ip_header[14 + 20];
+	struct sockaddr_ll sock_addr;
+	int ret, i;
+	int len;
+	fd_set rset;
+	struct timeval t = {.tv_sec = 1 };
+	char *send_buf;
+	//char recv_buf[14 + 20 + 16];
+	char recv_buf[14 + 20 + 16 + 100];
+	char send_data[16] = { 0x00, 0x01, 0x02, 0x03,
+		0x04, 0x05, 0x06, 0x07,
+		0x08, 0x09, 0x0a, 0x0b,
+		0x0c, 0x0d, 0x0e, 0x0f
+	};
+
+
+	srv_sock_create("eth0", &srv_data);
+	sock_create_bind("eth0", &cli_data);
+	gen_mac_ip_header(&cli_data, mac_ip_header, sizeof(send_data));
+	
+	len = IP_HDR_LEN + ETH_HDR_LEN + sizeof(send_data);
+	send_buf = malloc(len);
+	if (!send_buf) {
+		printf("alloc send_buf fail\n");
+		close(cli_data.sockfd);
+		close(srv_data.sockfd);
+		return -1;
+	}
+	memcpy(send_buf, mac_ip_header, IP_HDR_LEN + ETH_HDR_LEN);
+	memcpy(send_buf + IP_HDR_LEN + ETH_HDR_LEN, send_data,
+	       sizeof(send_data));
+
+
+	ret = sendto(cli_data.sockfd, send_buf, len, 0,
+		     (struct sockaddr *)&cli_data.sock_addr,
+		     sizeof(cli_data.sock_addr));
+	printf("write %d bytes\n", ret);
+
+	for( ; ; ) {
+		FD_ZERO(&rset);
+		FD_SET(srv_data.sockfd, &rset);
+		ret = select(srv_data.sockfd + 1, &rset, NULL, NULL, &t);
+		printf("select ret %d\n", ret);
+		if (ret <0) {
+			printf("select fail\n");
+			goto fail;
+		} else if (ret == 0) {
+			printf("select timeout\n");
+			goto fail;
+
+		}
+		
+		if (FD_ISSET(srv_data.sockfd, &rset)) {
+			printf("server socket is reachable");
+			ret = recvfrom(srv_data.sockfd, recv_buf,
+				       sizeof(recv_buf), 0, NULL, NULL);
+			printf("read %d bytes\n", ret);
+
+		  if(ret == 50)
+		  	break;
+
+
+		}
+
+	}
+
+	close(srv_data.sockfd);
+
+	return 0;
+
+fail:
+	close(srv_data.sockfd);
+
+	return -1;
+}
