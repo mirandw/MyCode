@@ -1,0 +1,108 @@
+raw socket提供普通TCPorUDP套接字不能提供的3个能力,可以构建传输层socket\IP层socket\链路层socket
+1. 传输层socket(四层socket, 普通socket)
+(1)创建
+socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)；//TCP
+//或者
+socket(AF_INET,SOCK_DGRAM,IPPROTO_UDP);//UDP
+(2)发送
+  sendto(sd,buffer,BUFSIZ,0,(SOCKADDR*)&addrServ,sizeof(SOCKADDR));//UDP
+  send(sd, buffer, BUFSIZ, 0);  //TCP
+(3)接收
+recvfrom(sd,buffer,BUFSIZ,0,(SOCKADDR*)&addrClient,sizeof(SOCKADDR));//UDP
+recv(sd, buffer, BUFSIZ, 0);//TCP
+后两个参数为发送或接收对方地址可以为NULL,代表发送和接收任意地址的数据
+
+2. IP层socket(三层socket)
+(1) 创建
+socket(AF_INET, SOCK_RAW, IPPROTO_UDP );//第三个参数可以是IPPROTO_TCP,TCP或者IPPROTO_ICMP
+(2) 接收
+recvfrom(sd, buffer, sizeof(buffer), 0,(struct sockaddr *)&client_addr, &addrlen));
+后两个参数可以为NULL
+(3)发送
+/*
+	如果IP_HDRINCL未开启，由进程让内核发送的数据是从IP首部之后的第一个字节开始的，内核会自动构造合适的IP
+	如果IP_HDRINGL开启，进程需要自行构造IP包
+	*/
+	/*
+	if (setsockopt(sd, IPPROTO_IP, IP_HDRINCL, val, sizeof(int)))
+	{
+		perror("setsockopt() error");
+		exit(-1);
+	}
+	*/
+sendto(sd, buffer, request_length, 0, (sockaddr *)&client_addr, addrlen);
+(4) bind
+一般不在原始套接字上调用bind函数.如果调用了bind绑定某个本地IP,那么发送数据包的源地址就是该IP,
+接收到的数据包的目的IP地址必须匹配这个绑定的地址,否则数据包不递送到这个套接字
+(5) connect
+一版也不在原始套接字上调用connect指定某个外地IP,那么接收到的数据包的源IP必须匹配这个已连接地址,
+发送的数据的目的IP也是这个外地IP
+
+3. 数据链路层socket(二层socket, 构造以太网帧)
+(1) 创建
+sock = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_IP));//第三个参数可以为ETH_P_ALL ETH_P_IP ETH_P_ARP等
+
+(2) 接收
+struct sockaddr_ll client;
+socklen_t addr_length = sizeof(sockaddr_ll);
+recvfrom(sock, buffer, 2048, 0, (sockaddr *)&client, &addr_length);//此时的地址是数据链路层的地址
+(3) 发送
+sendto(sock, sendbuffer, n, 0, (struct sockaddr *) &client, sizeof(client));
+
+总结:
+
+raw socket，即原始套接字，可以接收本机网卡上的数据帧或者数据包,对与监听网络的流量和分析是很有作用的.一共可以有3种方式创建这种socket
+
+1.socket(AF_INET, SOCK_RAW, IPPROTO_TCP|IPPROTO_UDP|IPPROTO_ICMP)发送接收ip数据包
+
+2.socket(PF_PACKET, SOCK_RAW, htons(ETH_P_IP|ETH_P_ARP|ETH_P_ALL))发送接收以太网数据帧
+
+3.socket(AF_INET, SOCK_PACKET, htons(ETH_P_IP|ETH_P_ARP|ETH_P_ALL))过时了,不要用啊
+
+理解一下SOCK_RAW的原理, 比如网卡收到了一个 14+20+8+100+4 的udp的以太网数据帧.
+
+　　首先,网卡对该数据帧进行硬过滤(根据网卡的模式不同会有不同的动作,如果设置了promisc混杂模式的话,则不做任何过滤直接交给下一层输入例程,否则非本机mac或者广播mac会被直接丢弃).按照上面的例子,如果成功的话,会进入ip输入例程.但是在进入ip输入例程之前,系统会检查系统中是否有通过socket(AF_PACKET, SOCK_RAW, ..)创建的套接字.如果有的话并且协议相符,在这个例子中就是需要ETH_P_IP或者ETH_P_ALL类型.系统就给每个这样的socket接收缓冲区发送一个数据帧拷贝.然后进入下一步.
+
+其次,进入了ip输入例程(ip层会对该数据包进行软过滤,就是检查校验或者丢弃非本机ip或者广播ip的数据包等,具体要参考源代码),例子中就是如果成功的话会进入udp输入例程.但是在交给udp输入例程之前,系统会检查系统中是否有通过socket(AF_INET, SOCK_RAW, ..)创建的套接字.如果有的话并且协议相符,在这个例子中就是需要IPPROTO_UDP类型.系统就给每个这样的socket接收缓冲区发送一个数据帧拷贝.然后进入下一步。
+
+最后,进入udp输入例程 ...
+
+ps:如果校验和出错的话,内核会直接丢弃该数据包的.而不会拷贝给sock_raw的套接字,因为校验和都出错了,数据肯定有问题的包括所有信息都没有意义了.
+
+进一步分析他们的能力.
+1. socket(AF_INET, SOCK_RAW, IPPROTO_UDP);
+
+能:该套接字可以接收协议类型为(tcp udp icmp等)发往本机的ip数据包,从上面看的就是20+8+100.
+
+不能:不能收到非发往本地ip的数据包(ip软过滤会丢弃这些不是发往本机ip的数据包).
+
+不能:不能收到从本机发送出去的数据包.
+
+发送的话需要自己组织tcp udp icmp等头部.可以setsockopt来自己包装ip头部
+
+这种套接字用来写个ping程序比较适合
+2. socket(PF_PACKET, SOCK_RAW, htons(x));
+
+这个套接字比较强大,创建这种套接字可以监听网卡上的所有数据帧.从上面看就是20+20+8+100.最后一个以太网crc从来都不算进来的,因为内核已经判断过了,对程序来说没有任何意义了.
+
+能: 接收发往本地mac的数据帧
+
+能: 接收从本机发送出去的数据帧(第3个参数需要设置为ETH_P_ALL)
+
+能: 接收非发往本地mac的数据帧(网卡需要设置为promisc混杂模式)
+
+协议类型一共有四个
+
+ETH_P_IP 0x800 只接收发往本机mac的ip类型的数据帧
+
+ETH_P_ARP 0x806 只接受发往本机mac的arp类型的数据帧
+
+ETH_P_ARP 0x8035 只接受发往本机mac的rarp类型的数据帧
+
+ETH_P_ALL 0x3 接收发往本机mac的所有类型ip arp rarp的数据帧, 接收从本机发出的所有类型的数据帧.(混杂模式打开的情况下,会接收到非发往本地mac的数据帧)
+3. socket(AF_INET, SOCK_PACKET, htons(ETH_P_ALL))，这个一般用于抓包程序。
+总结使用方法:
+
+1.只想收到发往本机某种协议的ip数据包的话用第一种就足够了
+
+2. 更多的详细的内容请使用第二种.包括ETH_P_ALL参数和混杂模式都可以使它的能力不断的加强.
