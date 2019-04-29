@@ -1,1 +1,42 @@
+分析linux中几个常用的宏定义
+1. ALIGN(x,a)表示计算x以a为倍数的上界数值
+/* linux/kernel.h */
 
+#define ALIGN(x,a)      __ALIGN_MASK(x,(typeof(x))(a)-1)  
+#define __ALIGN_MASK(x,mask)    (((x)+(mask))&~(mask))  
+
+上面代码中，typeof(x)表示取x的类型，如果x是int，则typeof(x)为int。
+
+(typeof(x))(a)-1，表明把a转化为x的类型，并减1，作为对齐掩码。
+
+不考虑类型，上述代码可以简化为如下：
+#define ALIGN(x,a)    (((x)+(a)-1)&~(a-1)) 
+
+计算a以size为倍数的下界数:
+    就让这个数(要计算的这个数)表示成二进制时，最后三位为0就可以达到这个目标。只要下面这个数与a进行"与运算"就可以了:
+    11111111 11111111 11111111 11111000
+    而上面这个数实际下就是 ~(size - 1)，可以将该数称为size的对齐掩码size_mask. 
+
+    计算a以size为倍数的上下界数:
+    #define alignment_down(a, size) (a & (~(size-1)) )
+    #define alignment_up(a, size)   ((a+size-1) & (~ (size-1)))
+    注: 上界数的计算方法，如果要求出比a大的是不是需要加上8就可以了?可是如果a本身就是8的倍数,
+    这样加8不就错了吗,所以在a基础上加上(size - 1), 然后与size的对齐掩码进行与运算.
+    
+2.container_of
+在Linux内核中是一个常用的宏，用于从包含在某个结构中的指针获得结构本身的指针，
+通俗地讲就是通过结构体变量中某个成员的首地址进而获得整个结构体变量的首地址。
+
+#define container_of(ptr, type, member) ({	    \
+	const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
+	(type *)( (char *)__mptr - offsetof(type,member) );})
+
+其实它的语法很简单，只是一些指针的灵活应用，它分两步：
+
+    第一步，首先定义一个临时的数据类型（通过typeof( ((type *)0)->member )获得）与ptr相同的指针变量__mptr，然后用它来保存ptr的值。
+
+    第二步，用(char *)__mptr减去member在结构体中的偏移量，得到的值就是整个结构体变量的首地址（整个宏的返回值就是这个首地址）。
+    
+#define offsetof(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER)
+
+补充(size_t, 是与机器有关的无符号整形, 多用在数组下标的正确类型则是size_t)
