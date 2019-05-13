@@ -1,1 +1,15 @@
-待补充
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+	//指针的字节数*8
+	void *number = 0;
+	printf("size of pointer is %d\n", sizeof(&number)*8);
+	//简单方法
+	printf("sizeof pointer is %d\n", sizeof(int *)*8);
+	//不用sizeof
+	int *ps[2];
+	int n = (char *)&ps[1] - (char *)&ps[0];
+	printf("machine bits is %d\n", n*8);
+	exit(0);
+}
